@@ -18,7 +18,10 @@ export default defineConfig({
       },
       output: {
         entryFileNames: (chunkInfo) => {
-          return `src/${chunkInfo.name}/${chunkInfo.name}.js`;
+          if (chunkInfo.name === 'content') {
+            return 'src/content/content.js';
+          }
+          return 'assets/[name]-[hash].js';
         },
       },
     },

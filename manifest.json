@@ -1,9 +1,33 @@
 {
   "manifest_version": 3,
-  "name": "Chrome Extension Template",
+  "name": "Job Auto Apply",
   "version": "1.0",
-  "description": "A template Chrome extension built with Mantine UI",
-  "permissions": [],
+  "description": "Automatically apply to jobs on LinkedIn and Indeed",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.linkedin.com/*",
+    "https://*.indeed.com/*"
+  ],
+  "web_accessible_resources": [{
+    "resources": ["src/content/content.js"],
+    "matches": ["https://*.linkedin.com/*", "https://*.indeed.com/*"]
+  }],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.linkedin.com/*",
+        "https://*.indeed.com/*"
+      ],
+      "js": ["src/content/content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "action": {
     "default_popup": "index.html",
     "default_icon": {
