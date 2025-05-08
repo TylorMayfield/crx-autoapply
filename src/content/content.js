@@ -565,25 +565,45 @@ class JobAutoApply {
         const emptyFields = [];
         const formFields = modal.querySelectorAll('input:not([type="hidden"]), textarea, select');
         
+        // Track radio button groups we've already processed
+        const processedRadioGroups = new Set();
+        
         for (const field of formFields) {
-            // Skip file inputs specifically marked for resumes/CVs
-            if (field.type === 'file') {
-                const container = field.closest('div, section, form');
-                const containerText = container?.textContent.toLowerCase() || '';
-                const fieldName = this.findFieldLabel(field)?.textContent.trim() || field.name || field.id || '';
-                
-                // Skip if it's a resume field
-                if (fieldName.toLowerCase().includes('resume') || 
-                    fieldName.toLowerCase().includes('cv') ||
-                    containerText.includes('resume') ||
-                    containerText.includes('cv') ||
-                    field.accept?.toLowerCase().includes('pdf') ||
-                    field.accept?.toLowerCase().includes('doc')) {
-                    console.log('[JobAutoApply] Skipping resume upload field:', fieldName);
-                    continue;
-                }
+            // Skip resume upload fields
+            if (field.type === 'file' && this.isResumeField(field)) {
+                continue;
             }
 
+            // Special handling for radio button groups
+            if (field.type === 'radio') {
+                const name = field.name;
+                // Only process each radio group once
+                if (!processedRadioGroups.has(name)) {
+                    processedRadioGroups.add(name);
+                    // Get all radio buttons in this group
+                    const radioGroup = modal.querySelectorAll(`input[type="radio"][name="${name}"]`);
+                    // Check if any radio button in the group is checked
+                    const isGroupEmpty = !Array.from(radioGroup).some(radio => radio.checked);
+                    
+                    if (isGroupEmpty && !field.disabled && field.style.display !== 'none') {
+                        // Find the fieldset or container label for the radio group
+                        const container = field.closest('fieldset, div');
+                        const legend = container?.querySelector('legend');
+                        const groupLabel = legend || 
+                                         container?.querySelector('label') || 
+                                         this.findFieldLabel(field);
+                        const fieldName = groupLabel?.textContent?.trim() || field.name;
+                        emptyFields.push({ 
+                            field: radioGroup, 
+                            fieldName,
+                            isRadioGroup: true 
+                        });
+                    }
+                }
+                continue;
+            }
+
+            // Regular field handling
             if (this.isFieldEmpty(field) && !field.disabled && field.style.display !== 'none') {
                 const labelElement = this.findFieldLabel(field);
                 const fieldName = labelElement?.textContent?.trim() || field.name || field.id;
@@ -615,7 +635,7 @@ class JobAutoApply {
     async handleEmptyFields(emptyFields) {
         let anyFieldsSkipped = false;
         
-        for (const { field, fieldName } of emptyFields) {
+        for (const { field, fieldName, isRadioGroup } of emptyFields) {
             // Special handling for resume-related fields
             if (fieldName.toLowerCase().includes('resume') || 
                 fieldName.toLowerCase().includes('cv')) {
@@ -623,14 +643,50 @@ class JobAutoApply {
             }
             
             console.log(`[JobAutoApply] Handling empty field: ${fieldName}`);
-            const isRequired = field.hasAttribute('required') || 
-                             field.closest('div')?.querySelector('.artdeco-text-input--required') !== null ||
-                             field.closest('div')?.textContent.includes('*');
-
+            
             // Try to find answer in local storage
             const answer = await this.findAnswerInStorage(fieldName);
             
-            // Always try stored answer first
+            if (isRadioGroup) {
+                const radioButtons = Array.from(field);
+                if (answer) {
+                    // Try to find and select the matching radio button
+                    const matchingButton = radioButtons.find(radio => {
+                        const label = this.findFieldLabel(radio);
+                        const radioValue = label?.textContent?.trim() || radio.value;
+                        return radioValue.toLowerCase() === answer.toLowerCase();
+                    });
+                    
+                    if (matchingButton) {
+                        matchingButton.checked = true;
+                        matchingButton.dispatchEvent(new Event('change', { bubbles: true }));
+                        console.log(`[JobAutoApply] Auto-selected radio option "${answer}" for "${fieldName}"`);
+                        continue;
+                    }
+                }
+                
+                // If no stored answer or no match found, prompt user
+                const options = radioButtons.map(radio => {
+                    const label = this.findFieldLabel(radio);
+                    return {
+                        value: radio.value,
+                        text: label?.textContent?.trim() || radio.value
+                    };
+                });
+                
+                const userAnswer = await this.promptUserForDropdown(fieldName, options);
+                if (userAnswer) {
+                    const selectedRadio = radioButtons.find(radio => radio.value === userAnswer.value);
+                    if (selectedRadio) {
+                        selectedRadio.checked = true;
+                        selectedRadio.dispatchEvent(new Event('change', { bubbles: true }));
+                        await this.saveAnswerToStorage(fieldName, userAnswer.text);
+                    }
+                }
+                continue;
+            }
+
+            // Handle regular fields
             if (answer) {
                 // For dropdowns, find matching option with enhanced matching
                 if (field.tagName === 'SELECT') {
