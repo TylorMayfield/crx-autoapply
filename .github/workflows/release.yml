@@ -1,0 +1,61 @@
+name: Build and Release Extension
+
+on:
+ workflow_dispatch:
+   inputs:
+     version:
+       description: 'Extension version (e.g., 1.4)'
+       required: true
+       type: string
+       default: '1.0'
+
+permissions:
+ contents: write
+ packages: write
+
+jobs:
+ build:
+   runs-on: ubuntu-latest
+
+   steps:
+   - uses: actions/checkout@v3
+
+   - name: Setup Node.js
+     uses: actions/setup-node@v3
+     with:
+       node-version: "18"
+       cache: "npm"
+
+   - name: Validate version
+     run: |
+       VERSION="${{ inputs.version }}"
+       if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+$ ]]; then
+         echo "Invalid version format. Use X.Y (e.g., 1.4)"
+         exit 1
+       fi
+
+   - name: Update manifest versions
+     run: |
+       VERSION="${{ inputs.version }}"
+       jq --arg version "$VERSION" '.version = $version' manifest.json > manifest_temp.json
+       mv manifest_temp.json manifest.json
+       jq --arg version "$VERSION" '.version = $version' package.json > package_temp.json
+       mv package_temp.json package.json
+
+   - name: Install dependencies
+     run: npm ci
+
+   - name: Build extension
+     run: npm run build
+
+   - name: Zip extension
+     run: |
+       cd dist
+       zip -r ../extension.zip *
+
+   - name: Create Release
+     uses: softprops/action-gh-release@v1
+     with:
+       files: extension.zip
+       tag_name: v${{ inputs.version }}
+       generate_release_notes: true
