@@ -1,3 +1,7 @@
+import { FormHandler } from './modules/formHandler';
+import { ModalHandler } from './modules/modalHandler';
+import { StorageHandler } from './modules/storageHandler';
+
 class JobAutoApply {
     constructor() {
         if (window.jobAutoApplyInitialized) return;
@@ -9,7 +13,12 @@ class JobAutoApply {
         this.userDataCache = {};
         this.isAutoRunning = false;
         this.autoRunnerInterval = null;
-        this.isProcessingJob = false; // Add flag to track if we're processing a job
+        this.isProcessingJob = false;
+
+        // Initialize handlers
+        this.formHandler = null; // Will be initialized after userData is loaded
+        this.modalHandler = new ModalHandler();
+        this.storageHandler = new StorageHandler();
 
         // Check if we're on a LinkedIn jobs page
         const isJobsPage = window.location.pathname.includes('/jobs/') || 
@@ -33,6 +42,9 @@ class JobAutoApply {
         const result = await chrome.storage.local.get(['isAutoRunning', 'userData']);
         this.userDataCache = result.userData || {};
         this.isAutoRunning = result.isAutoRunning || false;
+        
+        // Initialize form handler with user data
+        this.formHandler = new FormHandler(this.userDataCache);
 
         this.setupMessageListener();
 
@@ -90,14 +102,20 @@ class JobAutoApply {
     }
 
     async runAutoApply() {
-        if (!this.isAutoRunning || this.platform !== 'linkedin' || this.isProcessingJob) return;
+        if (!this.isAutoRunning || this.platform !== 'linkedin') return;
+
+        // Use a lock to ensure only one job is processed at a time
+        if (this.isProcessingJob) {
+            console.log('[JobAutoApply] Already processing a job, skipping this run');
+            return;
+        }
 
         try {
             this.isProcessingJob = true; // Set flag before starting
-            
+
             // Try to find an Easy Apply job in the current list
             const jobFound = await this.findAndProcessNextJob();
-            
+
             if (!jobFound) {
                 // If no jobs found in current page, try to go to next page
                 const nextPageClicked = await this.goToNextPage();
@@ -107,6 +125,8 @@ class JobAutoApply {
                 // Wait for new page to load
                 await new Promise(res => setTimeout(res, 2000));
             }
+        } catch (error) {
+            console.error('[JobAutoApply] Error during auto-apply:', error);
         } finally {
             this.isProcessingJob = false; // Always clear flag when done
         }
@@ -184,24 +204,85 @@ class JobAutoApply {
         while (this.isAutoRunning) {
             await new Promise(res => setTimeout(res, 2000));
 
-            // Handle all empty fields first, before any other actions
-            const emptyFields = this.findEmptyFormFields(modal);
-            if (emptyFields.length > 0) {
-                console.log('[JobAutoApply] Found empty fields:', emptyFields.map(f => f.fieldName));
+            // First, always check for a Done button and try to click it
+            const doneButton = Array.from(modal.querySelectorAll('button')).find(btn => {
+                const buttonText = btn.textContent.trim().toLowerCase();
+                const spanElement = btn.querySelector('span.artdeco-button__text');
+                const spanText = spanElement?.textContent.trim().toLowerCase() || '';
+                const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
                 
-                // Always try to handle empty fields
-                await this.handleEmptyFields(emptyFields);
+                return buttonText === 'done' || 
+                       spanText === 'done' ||
+                       ariaLabel.includes('done') ||
+                       ariaLabel.includes('dismiss') ||
+                       btn.closest('button[aria-label*="done" i]') !== null;
+            });
+
+            if (doneButton) {
+                console.log('[JobAutoApply] Found Done button, attempting to click');
+                doneButton.click();
+                await new Promise(res => setTimeout(res, 1000));
                 
-                // Add extra wait time after filling fields
-                await new Promise(res => setTimeout(res, 2000));
+                // Check if modal is gone
+                if (!document.contains(modal) || !modal.offsetParent) {
+                    console.log('[JobAutoApply] Successfully closed modal with Done button');
+                    return true;
+                }
+            }
+
+            // Check if we're on a resume step first
+            const isResumeStep = modal.querySelector('.jobs-resume-picker') !== null;
+            if (isResumeStep) {
+                console.log('[JobAutoApply] Resume step detected, proceeding with next button');
+                // Immediately look for next/review button without handling other fields
+                const nextButton = Array.from(modal.querySelectorAll('button')).find(btn => {
+                    const text = btn.textContent.trim().toLowerCase();
+                    const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
+                    return text.includes('next') || 
+                           text.includes('review') || 
+                           ariaLabel.includes('next') || 
+                           ariaLabel.includes('review');
+                });
                 
-                // Verify if we still have empty fields
-                const remainingEmptyFields = this.findEmptyFormFields(modal);
-                if (remainingEmptyFields.length > 0) {
-                    console.log('[JobAutoApply] Still have empty fields, need user input:', 
-                        remainingEmptyFields.map(f => f.fieldName));
-                    // Skip rest of loop to allow for user input
+                if (nextButton) {
+                    console.log('[JobAutoApply] Clicking next/review on resume step');
+                    nextButton.click();
+                    await new Promise(res => setTimeout(res, 2000));
                     continue;
+                }
+            }
+
+            // Handle non-resume empty fields
+            const emptyFields = this.formHandler.findEmptyFormFields(modal);
+            if (emptyFields.length > 0) {
+                // Filter out resume-related fields
+                const nonResumeFields = emptyFields.filter(f => 
+                    !f.fieldName.toLowerCase().includes('resume') && 
+                    !f.fieldName.toLowerCase().includes('cv')
+                );
+
+                if (nonResumeFields.length > 0) {
+                    console.log('[JobAutoApply] Found non-resume empty fields:', nonResumeFields.map(f => f.fieldName));
+                    
+                    // Try to handle non-resume empty fields
+                    await this.formHandler.handleEmptyFields(nonResumeFields);
+                    
+                    // Add extra wait time after filling fields
+                    await new Promise(res => setTimeout(res, 2000));
+                    
+                    // Verify if we still have empty fields that aren't resume-related
+                    const remainingFields = this.formHandler.findEmptyFormFields(modal);
+                    const remainingNonResumeFields = remainingFields.filter(f => 
+                        !f.fieldName.toLowerCase().includes('resume') && 
+                        !f.fieldName.toLowerCase().includes('cv')
+                    );
+
+                    if (remainingNonResumeFields.length > 0) {
+                        console.log('[JobAutoApply] Still have non-resume empty fields, need user input:', 
+                            remainingNonResumeFields.map(f => f.fieldName));
+                        // Skip rest of loop to allow for user input
+                        continue;
+                    }
                 }
             }
 
@@ -277,55 +358,7 @@ class JobAutoApply {
                 visibleButtons: modalContent.visibleButtons.map(b => b.text)
             });
 
-            // If we're in a done state, handle it first
-            if (modalContent.isDoneState || modalContent.hasSuccessMessage) {
-                // Try to find the Done button with more comprehensive selectors
-                const possibleDoneButtons = Array.from(modal.querySelectorAll('button')).filter(btn => {
-                    const buttonText = btn.textContent.trim().toLowerCase();
-                    const spanText = btn.querySelector('span')?.textContent.trim().toLowerCase() || '';
-                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    
-                    return buttonText === 'done' || 
-                           spanText === 'done' ||
-                           ariaLabel.includes('done') ||
-                           ariaLabel.includes('dismiss');
-                });
-
-                console.log('[JobAutoApply] Found possible done buttons:', possibleDoneButtons.length);
-
-                for (const button of possibleDoneButtons) {
-                    console.log('[JobAutoApply] Attempting to click done button');
-                    button.click();
-                    await new Promise(res => setTimeout(res, 1000));
-                    
-                    // Check if modal is gone
-                    if (!document.contains(modal) || !modal.offsetParent) {
-                        console.log('[JobAutoApply] Successfully closed modal with done button');
-                        return true;
-                    }
-                }
-
-                // If we still haven't closed the modal, try using Escape
-                if (document.contains(modal) && modal.offsetParent) {
-                    console.log('[JobAutoApply] Trying Escape key to close modal');
-                    document.dispatchEvent(new KeyboardEvent('keydown', {
-                        key: 'Escape',
-                        code: 'Escape',
-                        keyCode: 27,
-                        which: 27,
-                        bubbles: true
-                    }));
-                    await new Promise(res => setTimeout(res, 1000));
-                    
-                    // If modal is gone after Escape, we're done
-                    if (!document.contains(modal) || !modal.offsetParent) {
-                        console.log('[JobAutoApply] Successfully closed modal with Escape key');
-                        return true;
-                    }
-                }
-            }
-
-            // If we have a success message but couldn't find the done button, track it and continue
+            // If we have a success message, track it and continue
             if (modalContent.hasSuccessMessage) {
                 try {
                     let companyName = 'Unknown Company';
@@ -419,11 +452,18 @@ class JobAutoApply {
                     console.log('[JobAutoApply] Submit button detected, waiting for success modal...');
                     await new Promise(res => setTimeout(res, 3000));
                     
-                    // Try to find and click the Done button first
-                    const doneButton = Array.from(modal.querySelectorAll('button')).find(btn => 
-                        btn.textContent.trim().toLowerCase() === 'done' ||
-                        btn.getAttribute('aria-label')?.toLowerCase().includes('done')
-                    );
+                    // Try to find and click the Done button first with enhanced selectors
+                    const doneButton = Array.from(modal.querySelectorAll('button')).find(btn => {
+                        const buttonText = btn.textContent.trim().toLowerCase();
+                        const spanElement = btn.querySelector('span.artdeco-button__text');
+                        const spanText = spanElement?.textContent.trim().toLowerCase() || '';
+                        const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
+                        
+                        return buttonText === 'done' || 
+                               spanText === 'done' ||
+                               ariaLabel.includes('done') ||
+                               btn.closest('button[aria-label*="done" i]') !== null;
+                    });
                     
                     if (doneButton) {
                         console.log('[JobAutoApply] Found Done button after submission');
@@ -538,99 +578,7 @@ class JobAutoApply {
         }
     }
 
-    isFieldEmpty(field) {
-        // For select elements (dropdowns)
-        if (field.tagName === 'SELECT') {
-            // Check if it has a selected option with value
-            // Consider the field empty if it has a placeholder-like first option
-            const firstOption = field.options[0];
-            const isPlaceholderOption = firstOption && (
-                firstOption.value === '' || 
-                firstOption.value === '-1' || 
-                firstOption.value === '0' ||
-                firstOption.text.toLowerCase().includes('select') ||
-                firstOption.text.toLowerCase().includes('choose')
-            );
-            
-            return !field.value || 
-                   field.value === '' || 
-                   field.value === '-1' ||
-                   (field.selectedIndex === 0 && isPlaceholderOption);
-        }
-        // For regular input fields
-        return !field.value;
-    }
-
-    findEmptyFormFields(modal) {
-        const emptyFields = [];
-        const formFields = modal.querySelectorAll('input:not([type="hidden"]), textarea, select');
-        
-        // Track radio button groups we've already processed
-        const processedRadioGroups = new Set();
-        
-        for (const field of formFields) {
-            // Skip resume upload fields
-            if (field.type === 'file' && this.isResumeField(field)) {
-                continue;
-            }
-
-            // Special handling for radio button groups
-            if (field.type === 'radio') {
-                const name = field.name;
-                // Only process each radio group once
-                if (!processedRadioGroups.has(name)) {
-                    processedRadioGroups.add(name);
-                    // Get all radio buttons in this group
-                    const radioGroup = modal.querySelectorAll(`input[type="radio"][name="${name}"]`);
-                    // Check if any radio button in the group is checked
-                    const isGroupEmpty = !Array.from(radioGroup).some(radio => radio.checked);
-                    
-                    if (isGroupEmpty && !field.disabled && field.style.display !== 'none') {
-                        // Find the fieldset or container label for the radio group
-                        const container = field.closest('fieldset, div');
-                        const legend = container?.querySelector('legend');
-                        const groupLabel = legend || 
-                                         container?.querySelector('label') || 
-                                         this.findFieldLabel(field);
-                        const fieldName = groupLabel?.textContent?.trim() || field.name;
-                        emptyFields.push({ 
-                            field: radioGroup, 
-                            fieldName,
-                            isRadioGroup: true 
-                        });
-                    }
-                }
-                continue;
-            }
-
-            // Regular field handling
-            if (this.isFieldEmpty(field) && !field.disabled && field.style.display !== 'none') {
-                const labelElement = this.findFieldLabel(field);
-                const fieldName = labelElement?.textContent?.trim() || field.name || field.id;
-                emptyFields.push({ field, fieldName });
-            }
-        }
-        
-        return emptyFields;
-    }
-
-    findFieldLabel(field) {
-        // Try finding label by for attribute
-        if (field.id) {
-            const label = document.querySelector(`label[for="${field.id}"]`);
-            if (label) return label;
-        }
-        
-        // Try finding label as parent or ancestor
-        let element = field.parentElement;
-        while (element) {
-            const label = element.querySelector('label');
-            if (label) return label;
-            element = element.parentElement;
-        }
-        
-        return null;
-    }
+    // Form handling methods moved to FormHandler class
 
     async handleEmptyFields(emptyFields) {
         let anyFieldsSkipped = false;
